@@ -60,6 +60,8 @@ import 'media_query.dart';
 ///    system.
 class SafeArea extends StatelessWidget {
   /// Creates a widget that avoids operating system interfaces.
+  ///
+  /// By default, all sides are safe.
   const SafeArea({
     super.key,
     this.left = true,
@@ -70,6 +72,40 @@ class SafeArea extends StatelessWidget {
     this.maintainBottomViewPadding = false,
     required this.child,
   });
+
+  /// Creates a widget that avoids operating system interfaces
+  /// only on the specified sides.
+  ///
+  /// By default, no sides are safe.
+  const SafeArea.only({
+    super.key,
+    this.left = false,
+    this.top = false,
+    this.right = false,
+    this.bottom = false,
+    this.minimum = EdgeInsets.zero,
+    this.maintainBottomViewPadding = false,
+    required this.child,
+  });
+
+  /// Creates a widget that avoids operating system interfaces
+  /// symmetrically.
+  ///
+  /// The [horizontal] argument applies to the left and right sides.
+  /// The [vertical] argument applies to the top and bottom sides.
+  ///
+  /// By default, no sides are safe.
+  const SafeArea.symmetric({
+    super.key,
+    bool horizontal = false,
+    bool vertical = false,
+    this.minimum = EdgeInsets.zero,
+    this.maintainBottomViewPadding = false,
+    required this.child,
+  }) : left = horizontal,
+       right = horizontal,
+       top = vertical,
+       bottom = vertical;
 
   /// Whether to avoid system intrusions on the left.
   final bool left;
@@ -108,6 +144,12 @@ class SafeArea extends StatelessWidget {
   ///
   /// {@macro flutter.widgets.ProxyWidget.child}
   final Widget child;
+
+  /// Whether the [left] and [right] flags are both true.
+  bool get horizontal => left && right;
+
+  /// Whether the [top] and [bottom] flags are both true.
+  bool get vertical => top && bottom;
 
   @override
   Widget build(BuildContext context) {
