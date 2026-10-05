@@ -44,17 +44,24 @@ final _sdkVersionRe = RegExp(r'^ro.build.version.sdk=([0-9]+)$');
 // $ANDROID_HOME/platforms/android-23/android.jar
 // $ANDROID_HOME/platforms/android-N/android.jar
 class AndroidSdk {
-  AndroidSdk(this.directory, {Java? java, FileSystem? fileSystem}) : _java = java {
-    reinitialize(fileSystem: fileSystem);
-  }
+  AndroidSdk(this.directory, {this._java});
 
   /// The Android SDK root directory.
   final Directory directory;
 
   final Java? _java;
 
-  var _sdkVersions = <AndroidSdkVersion>[];
+  List<AndroidSdkVersion> _sdkVersions = <AndroidSdkVersion>[];
   AndroidSdkVersion? _latestVersion;
+  bool _reinitialized = false;
+
+  void _ensureInitialized() {
+    if (_reinitialized) {
+      return;
+    }
+    _reinitialized = true;
+    reinitialize();
+  }
 
   /// Whether the `cmdline-tools` directory exists in the Android SDK.
   ///
@@ -170,9 +177,15 @@ class AndroidSdk {
     return globals.fs.isDirectorySync(globals.fs.path.join(dir, 'licenses'));
   }
 
-  List<AndroidSdkVersion> get sdkVersions => _sdkVersions;
+  List<AndroidSdkVersion> get sdkVersions {
+    _ensureInitialized();
+    return _sdkVersions;
+  }
 
-  AndroidSdkVersion? get latestVersion => _latestVersion;
+  AndroidSdkVersion? get latestVersion {
+    _ensureInitialized();
+    return _latestVersion;
+  }
 
   late final String? adbPath = getPlatformToolsPath(globals.platform.isWindows ? 'adb.exe' : 'adb');
 
@@ -353,64 +366,69 @@ class AndroidSdk {
   /// 5. Look for the default install location inside the Android SDK:
   ///    [directory]/ndk/\<version\>/. If multiple versions exist, use the
   ///    newest.
+  Iterable<Directory> getNdkDirectoriesInResolutionOrder({Platform? platform, Config? config}) {
+    platform ??= globals.platform;
+    config ??= globals.config;
+
+    final ndkDirectories = <Directory>[];
+    String? androidNdkHomeDir;
+    if (config.containsKey('android-ndk')) {
+      androidNdkHomeDir = config.getValue('android-ndk') as String?;
+    } else if (platform.environment.containsKey(kAndroidNdkHome)) {
+      androidNdkHomeDir = platform.environment[kAndroidNdkHome];
+    } else if (platform.environment.containsKey(kAndroidNdkPath)) {
+      androidNdkHomeDir = platform.environment[kAndroidNdkPath];
+    } else if (platform.environment.containsKey(kAndroidNdkRoot)) {
+      androidNdkHomeDir = platform.environment[kAndroidNdkRoot];
+    }
+    if (androidNdkHomeDir != null) {
+      ndkDirectories.add(directory.fileSystem.directory(androidNdkHomeDir));
+    }
+
+    // Look for the default install location of the NDK inside the Android
+    // SDK when installed through `sdkmanager` or Android studio.
+    final Directory ndk = directory.childDirectory('ndk');
+    if (!ndk.existsSync()) {
+      return ndkDirectories;
+    }
+    final List<Version> ndkVersions =
+        ndk
+            .listSync()
+            .map((FileSystemEntity entity) {
+              try {
+                return Version.parse(entity.basename);
+              } on Exception {
+                return null;
+              }
+            })
+            .whereType<Version>()
+            .toList()
+          // Use latest NDK first.
+          ..sort((Version a, Version b) => -a.compareTo(b));
+    for (final ndkVersion in ndkVersions) {
+      ndkDirectories.add(ndk.childDirectory(ndkVersion.toString()));
+    }
+    return ndkDirectories;
+  }
+
   String? getNdkBinaryPath(String binaryName, {Platform? platform, Config? config}) {
     platform ??= globals.platform;
     config ??= globals.config;
-    Directory? findAndroidNdkHomeDir() {
-      String? androidNdkHomeDir;
-      if (config!.containsKey('android-ndk')) {
-        androidNdkHomeDir = config.getValue('android-ndk') as String?;
-      } else if (platform!.environment.containsKey(kAndroidNdkHome)) {
-        androidNdkHomeDir = platform.environment[kAndroidNdkHome];
-      } else if (platform.environment.containsKey(kAndroidNdkPath)) {
-        androidNdkHomeDir = platform.environment[kAndroidNdkPath];
-      } else if (platform.environment.containsKey(kAndroidNdkRoot)) {
-        androidNdkHomeDir = platform.environment[kAndroidNdkRoot];
+    for (final Directory androidNdkHomeDir in getNdkDirectoriesInResolutionOrder(
+      platform: platform,
+      config: config,
+    )) {
+      final File executable = androidNdkHomeDir
+          .childDirectory('toolchains')
+          .childDirectory('llvm')
+          .childDirectory('prebuilt')
+          .childDirectory(_llvmHostDirectoryName[platform.operatingSystem]!)
+          .childDirectory('bin')
+          .childFile(binaryName);
+      if (executable.existsSync()) {
+        // LLVM missing in this NDK version.
+        return executable.path;
       }
-      if (androidNdkHomeDir != null) {
-        return directory.fileSystem.directory(androidNdkHomeDir);
-      }
-
-      // Look for the default install location of the NDK inside the Android
-      // SDK when installed through `sdkmanager` or Android studio.
-      final Directory ndk = directory.childDirectory('ndk');
-      if (!ndk.existsSync()) {
-        return null;
-      }
-      final List<Version> ndkVersions =
-          ndk
-              .listSync()
-              .map((FileSystemEntity entity) {
-                try {
-                  return Version.parse(entity.basename);
-                } on Exception {
-                  return null;
-                }
-              })
-              .whereType<Version>()
-              .toList()
-            // Use latest NDK first.
-            ..sort((Version a, Version b) => -a.compareTo(b));
-      if (ndkVersions.isEmpty) {
-        return null;
-      }
-      return ndk.childDirectory(ndkVersions.first.toString());
-    }
-
-    final Directory? androidNdkHomeDir = findAndroidNdkHomeDir();
-    if (androidNdkHomeDir == null) {
-      return null;
-    }
-    final File executable = androidNdkHomeDir
-        .childDirectory('toolchains')
-        .childDirectory('llvm')
-        .childDirectory('prebuilt')
-        .childDirectory(_llvmHostDirectoryName[platform.operatingSystem]!)
-        .childDirectory('bin')
-        .childFile(binaryName);
-    if (executable.existsSync()) {
-      // LLVM missing in this NDK version.
-      return executable.path;
     }
     return null;
   }
@@ -446,7 +464,8 @@ class AndroidSdk {
   ///
   /// This method should be called in a case where the tooling may have updated
   /// SDK artifacts, such as after running a gradle build.
-  void reinitialize({FileSystem? fileSystem}) {
+  void reinitialize() {
+    _reinitialized = true;
     var buildTools = <Version>[]; // 19.1.0, 22.0.1, ...
 
     final Directory buildToolsDir = directory.childDirectory('build-tools');
@@ -509,10 +528,10 @@ class AndroidSdk {
 
           return AndroidSdkVersion._(
             this,
-            sdkLevel: platformVersion,
-            platformName: platformName,
             buildToolsVersion: buildToolsVersion,
-            fileSystem: fileSystem ?? globals.fs,
+            fileSystem: directory.fileSystem,
+            platformName: platformName,
+            sdkLevel: platformVersion,
           );
         })
         .whereType<AndroidSdkVersion>()
@@ -560,8 +579,8 @@ class AndroidSdkVersion implements Comparable<AndroidSdkVersion> {
     required this.sdkLevel,
     required this.platformName,
     required this.buildToolsVersion,
-    required FileSystem fileSystem,
-  }) : _fileSystem = fileSystem;
+    required this._fileSystem,
+  });
 
   final AndroidSdk sdk;
   final int sdkLevel;

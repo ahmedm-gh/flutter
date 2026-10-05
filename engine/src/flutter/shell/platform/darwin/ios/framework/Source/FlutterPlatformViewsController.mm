@@ -105,12 +105,12 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
 @property(nonatomic, readonly) FlutterClippingMaskViewPool* maskViewPool;
 
 @property(nonatomic, readonly)
-    std::unordered_map<std::string, NSObject<FlutterPlatformViewFactory>*>& factories;
+    NSMutableDictionary<NSString*, NSObject<FlutterPlatformViewFactory>*>* factories;
 
-// The FlutterPlatformViewGestureRecognizersBlockingPolicy for each type of platform view.
+// The FlutterPlatformViewGestureRecognizersBlockingPolicy for each type of platform view, boxed in
+// an NSNumber.
 @property(nonatomic, readonly)
-    std::unordered_map<std::string, FlutterPlatformViewGestureRecognizersBlockingPolicy>&
-        gestureRecognizersBlockingPoliciesByType;
+    NSMutableDictionary<NSString*, NSNumber*>* gestureRecognizersBlockingPoliciesByType;
 
 /// The size of the current onscreen surface in physical pixels.
 @property(nonatomic, assign) DlISize frameSize;
@@ -238,9 +238,8 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
   // `self.slices[viewId] = x`.
   std::unique_ptr<flutter::OverlayLayerPool> _layerPool;
   std::unordered_map<int64_t, std::unique_ptr<flutter::EmbedderViewSlice>> _slices;
-  std::unordered_map<std::string, NSObject<FlutterPlatformViewFactory>*> _factories;
-  std::unordered_map<std::string, FlutterPlatformViewGestureRecognizersBlockingPolicy>
-      _gestureRecognizersBlockingPoliciesByType;
+  NSMutableDictionary<NSString*, NSObject<FlutterPlatformViewFactory>*>* _factories;
+  NSMutableDictionary<NSString*, NSNumber*>* _gestureRecognizersBlockingPoliciesByType;
   FlutterFMLTaskRunner* _platformTaskRunner;
   std::unordered_map<int64_t, PlatformViewData> _platformViews;
   std::unordered_map<int64_t, flutter::EmbeddedViewParams> _currentCompositionParams;
@@ -254,6 +253,8 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
 - (id)init {
   if (self = [super init]) {
     _layerPool = std::make_unique<flutter::OverlayLayerPool>();
+    _factories = [[NSMutableDictionary alloc] init];
+    _gestureRecognizersBlockingPoliciesByType = [[NSMutableDictionary alloc] init];
     _maskViewPool =
         [[FlutterClippingMaskViewPool alloc] initWithCapacity:kFlutterClippingMaskViewPoolCapacity];
     _hadPlatformViews = NO;
@@ -288,9 +289,16 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
   NSDictionary<NSString*, id>* args = [call arguments];
 
   int64_t viewId = [args[@"id"] longLongValue];
+  // A missing argument arrives as nil and an explicit Dart null as NSNull, neither of which can be
+  // converted to a view type.
   NSString* viewTypeString = args[@"viewType"];
-  std::string viewType(viewTypeString.UTF8String);
-
+  if (![viewTypeString isKindOfClass:[NSString class]]) {
+    result([FlutterError
+        errorWithCode:@"unknown_view"
+              message:@"'viewType' argument must be a string to create a platform view."
+              details:nil]);
+    return;
+  }
   if (self.platformViews.count(viewId) != 0) {
     result([FlutterError errorWithCode:@"recreating_view"
                                message:@"trying to create an already created view"
@@ -298,7 +306,7 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
     return;
   }
 
-  NSObject<FlutterPlatformViewFactory>* factory = self.factories[viewType];
+  NSObject<FlutterPlatformViewFactory>* factory = self.factories[viewTypeString];
   if (factory == nil) {
     result([FlutterError
         errorWithCode:@"unregistered_view_type"
@@ -343,7 +351,8 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
         FlutterPlatformViewGestureRecognizersBlockingPolicyWaitUntilTouchesEnded;
   } else if ([gestureBlockingPolicyValue
                  isEqualToString:kGestureBlockingPolicyFallbackToPluginDefault]) {
-    gestureBlockingPolicy = self.gestureRecognizersBlockingPoliciesByType[viewType];
+    gestureBlockingPolicy = static_cast<FlutterPlatformViewGestureRecognizersBlockingPolicy>(
+        self.gestureRecognizersBlockingPoliciesByType[viewTypeString].integerValue);
   } else {
     result([FlutterError
         errorWithCode:@"unknown_gesture_blocking_policy"
@@ -422,10 +431,9 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
                               withId:(NSString*)factoryId
     gestureRecognizersBlockingPolicy:
         (FlutterPlatformViewGestureRecognizersBlockingPolicy)gestureRecognizerBlockingPolicy {
-  std::string idString([factoryId UTF8String]);
-  FML_CHECK(self.factories.count(idString) == 0);
-  self.factories[idString] = factory;
-  self.gestureRecognizersBlockingPoliciesByType[idString] = gestureRecognizerBlockingPolicy;
+  FML_CHECK(self.factories[factoryId] == nil);
+  self.factories[factoryId] = factory;
+  self.gestureRecognizersBlockingPoliciesByType[factoryId] = @(gestureRecognizerBlockingPolicy);
 }
 
 - (void)beginFrameWithSize:(DlISize)frameSize {
@@ -435,15 +443,6 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
 
 - (void)cancelFrame {
   [self resetFrameState];
-}
-
-- (flutter::PostPrerollResult)postPrerollActionWithThreadMerger:
-    (const fml::RefPtr<fml::RasterThreadMerger>&)rasterThreadMerger {
-  return flutter::PostPrerollResult::kSuccess;
-}
-
-- (void)endFrameWithResubmit:(BOOL)shouldResubmitFrame
-                threadMerger:(const fml::RefPtr<fml::RasterThreadMerger>&)rasterThreadMerger {
 }
 
 - (void)pushFilterToVisitedPlatformViews:(const std::shared_ptr<flutter::DlImageFilter>&)filter
@@ -615,10 +614,8 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
           [pendingClipRRects removeAllObjects];
         }
         visualEffectView.layer.cornerRadius = cornerRadius;
-        if (@available(iOS 13.0, *)) {
-          visualEffectView.layer.cornerCurve =
-              isRoundedSuperellipse ? kCACornerCurveContinuous : kCACornerCurveCircular;
-        }
+        visualEffectView.layer.cornerCurve =
+            isRoundedSuperellipse ? kCACornerCurveContinuous : kCACornerCurveCircular;
         visualEffectView.clipsToBounds = YES;
 
         PlatformViewFilter* filter = [[PlatformViewFilter alloc] initWithFrame:frameInClipView
@@ -957,8 +954,10 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
 
 - (void)bringLayersIntoView:(const LayersMap&)layerMap
        withCompositionOrder:(const std::vector<int64_t>&)compositionOrder {
-  FML_DCHECK(self.flutterView);
   UIView* flutterView = self.flutterView;
+  if (flutterView == nil) {
+    return;
+  }
 
   _previousCompositionOrder.clear();
   NSMutableArray* desiredPlatformSubviews = [NSMutableArray array];
@@ -1103,15 +1102,6 @@ static CGRect GetCGRectFromDlRect(const DlRect& clipDlRect) {
 
 - (std::unordered_map<int64_t, std::unique_ptr<flutter::EmbedderViewSlice>>&)slices {
   return _slices;
-}
-
-- (std::unordered_map<std::string, NSObject<FlutterPlatformViewFactory>*>&)factories {
-  return _factories;
-}
-
-- (std::unordered_map<std::string, FlutterPlatformViewGestureRecognizersBlockingPolicy>&)
-    gestureRecognizersBlockingPoliciesByType {
-  return _gestureRecognizersBlockingPoliciesByType;
 }
 
 - (std::unordered_map<int64_t, PlatformViewData>&)platformViews {
